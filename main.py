@@ -19,18 +19,22 @@ class ServerManager(Star):
         self.log_operations: bool = True
         self.user_cwd: dict = {}  # 记录每个用户的当前工作目录
         self.user_history: dict = {}  # 记录每个用户的命令历史
-        
+
     async def initialize(self):
         """初始化插件，加载配置"""
         try:
-            self.enabled_groups = self.config.get("enabled_groups", [])
-            self.command_timeout = self.config.get("command_timeout", 30)
-            self.max_output_length = self.config.get("max_output_length", 2000)
-            self.log_operations = self.config.get("log_operations", True)
+            # 获取 sysmanager 配置项
+            plugin_config = self.config.get("sysmanager", {})
+            
+            self.enabled_groups = plugin_config.get("enabled_groups", [])
+            self.command_timeout = plugin_config.get("command_timeout", 30)
+            self.max_output_length = plugin_config.get("max_output_length", 2000)
+            self.log_operations = plugin_config.get("log_operations", True)
             
             astrbot_admins = self.context.get_config().get("admins_id", [])
             
             logger.info(f"✅ 服务器管理插件已加载")
+            logger.info(f"   原始配置: {self.config}")  # 调试用
             logger.info(f"   管理员数量: {len(astrbot_admins)}")
             if self.enabled_groups:
                 logger.info(f"   生效范围: {len(self.enabled_groups)}个指定群")
@@ -140,21 +144,35 @@ class ServerManager(Star):
         
         if cmd == "info":
             # 显示当前会话信息（用于调试）
-            info = f"会话信息:\n"
+            info = f"🔍 会话信息:\n"
             info += f"Session ID: {event.session_id}\n"
             info += f"用户 ID: {user_id}\n"
-            info += f"管理员: {'是' if event.is_admin() else '否'}\n"
-            info += f"配置的群组: {self.enabled_groups}\n"
+            info += f"管理员: {'是' if event.is_admin() else '否'}\n\n"
+            
+            info += f"📋 配置信息:\n"
+            info += f"原始配置: {self.config}\n"
+            info += f"生效的群组: {self.enabled_groups}\n"
+            info += f"超时时间: {self.command_timeout}秒\n"
+            info += f"最大输出: {self.max_output_length}字符\n\n"
             
             # 尝试解析群号
             group_id = None
             if ":" in event.session_id:
                 parts = event.session_id.split(":")
+                info += f"Session分析: {parts}\n"
                 if len(parts) >= 3 and "group" in parts[1].lower():
                     group_id = parts[2]
             
+            info += f"\n🔐 权限状态:\n"
             info += f"当前群号: {group_id if group_id else '(私聊或无法解析)'}\n"
-            info += f"权限检查: {'通过' if self._check_group_permission(event) else '不通过'}"
+            info += f"权限检查: {'✅ 通过' if self._check_group_permission(event) else '❌ 不通过'}\n"
+            
+            if group_id and self.enabled_groups:
+                if group_id in [str(g) for g in self.enabled_groups]:
+                    info += f"状态: 群 {group_id} 在白名单中"
+                else:
+                    info += f"状态: 群 {group_id} 不在白名单中"
+                    
             yield event.plain_result(info)
             return
         
