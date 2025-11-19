@@ -32,7 +32,11 @@ class ServerManager(Star):
             
             logger.info(f"✅ 服务器管理插件已加载")
             logger.info(f"   管理员数量: {len(astrbot_admins)}")
-            logger.info(f"   生效范围: {'所有群和私聊' if not self.enabled_groups else f'{len(self.enabled_groups)}个指定群'}")
+            if self.enabled_groups:
+                logger.info(f"   生效范围: {len(self.enabled_groups)}个指定群")
+                logger.info(f"   群组列表: {self.enabled_groups}")
+            else:
+                logger.info(f"   生效范围: 所有群和私聊")
             logger.info(f"   命令前缀: /sys (固定)")
             logger.info(f"   命令超时: {self.command_timeout}秒")
             logger.info(f"   最大输出: {self.max_output_length}字符")
@@ -51,15 +55,50 @@ class ServerManager(Star):
         if not self.enabled_groups:
             return True
         
-        # 获取群号（如果是群聊）
+        # 获取session_id并记录格式
         session_id = event.session_id
-        # session_id 格式类似: aiocqhttp:GroupMessage:123456789
-        parts = session_id.split(":")
-        if len(parts) >= 3 and "Group" in parts[1]:
-            group_id = parts[2]
-            return group_id in [str(g) for g in self.enabled_groups]
+        logger.debug(f"Session ID: {session_id}")
         
-        # 私聊也允许（可选，根据需求调整）
+        # 尝试多种格式解析
+        group_id = None
+        
+        # 格式1: aiocqhttp:GroupMessage:123456789
+        if ":" in session_id:
+            parts = session_id.split(":")
+            if len(parts) >= 3:
+                # 检查是否为群消息
+                if "group" in parts[1].lower():
+                    group_id = parts[2]
+        
+        # 格式2: 直接是群号（某些适配器）
+        elif session_id.isdigit():
+            group_id = session_id
+        
+        # 格式3: 从event对象获取
+        if not group_id:
+            # 尝试获取群号的其他方式
+            try:
+                # 某些适配器可能有 group_id 属性
+                if hasattr(event, 'group_id'):
+                    group_id = str(getattr(event, 'group_id', None))
+                # 或者从 raw_message 中解析
+                elif hasattr(event, 'raw_message'):
+                    raw_msg = getattr(event, 'raw_message', None)
+                    if raw_msg and hasattr(raw_msg, 'group_id'):
+                        group_id = str(getattr(raw_msg, 'group_id', None))
+            except:
+                pass
+        
+        # 如果是群消息，检查是否在白名单中
+        if group_id:
+            # 将配置中的群号都转为字符串比较
+            allowed_groups = [str(g) for g in self.enabled_groups]
+            is_allowed = group_id in allowed_groups
+            if not is_allowed:
+                logger.info(f"群 {group_id} 不在白名单中，白名单: {allowed_groups}")
+            return is_allowed
+        
+        # 私聊默认允许（管理员已经在装饰器中检查过了）
         return True
     
     @filter.permission_type(PermissionType.ADMIN)
@@ -99,6 +138,26 @@ class ServerManager(Star):
             yield event.plain_result(result.strip())
             return
         
+        if cmd == "info":
+            # 显示当前会话信息（用于调试）
+            info = f"会话信息:\n"
+            info += f"Session ID: {event.session_id}\n"
+            info += f"用户 ID: {user_id}\n"
+            info += f"管理员: {'是' if event.is_admin() else '否'}\n"
+            info += f"配置的群组: {self.enabled_groups}\n"
+            
+            # 尝试解析群号
+            group_id = None
+            if ":" in event.session_id:
+                parts = event.session_id.split(":")
+                if len(parts) >= 3 and "group" in parts[1].lower():
+                    group_id = parts[2]
+            
+            info += f"当前群号: {group_id if group_id else '(私聊或无法解析)'}\n"
+            info += f"权限检查: {'通过' if self._check_group_permission(event) else '不通过'}"
+            yield event.plain_result(info)
+            return
+        
         if not cmd:
             # 显示当前工作目录
             current_cwd = self.user_cwd.get(user_id, os.getcwd())
@@ -108,7 +167,8 @@ class ServerManager(Star):
                 f"内置命令:\n"
                 f"  pwd: 显示当前目录\n"
                 f"  history: 查看命令历史\n"
-                f"  reset: 重置工作目录\n\n"
+                f"  reset: 重置工作目录\n"
+                f"  info: 查看会话信息\n\n"
                 f"参数:\n"
                 f"  -f: 强制全部输出\n\n"
                 f"示例:\n"
