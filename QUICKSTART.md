@@ -1,66 +1,64 @@
 # 🚀 快速开始
 
-## 安装
+## 1️⃣ 安装插件
 
-```bash
-pip install psutil
+在AstrBot Web面板：
+- 插件管理 → 插件商店 → 搜索 "SysManager" → 安装
+
+## 2️⃣ 配置权限
+
+### 选项A：所有群可用（默认）
+```json
+{
+  "enabled_groups": []
+}
 ```
 
-## 配置管理员
-
-```bash
-/sid        # 查看你的ID
-/op 你的ID  # 授权为管理员
+### 选项B：限制特定群
+```json
+{
+  "enabled_groups": [123456789]  // 填入群号
+}
 ```
 
-## 开始使用
+**获取群号：** 在群里发送 `/sid`
+
+## 3️⃣ 基本使用
 
 ```bash
-/sys ls           # Linux/macOS
-/sys dir          # Windows
+/sys ls                 # 查看文件
+/sys pwd                # 当前目录
+/sys cd /var/log       # 切换目录
+/sys cat file.txt      # 查看文件内容
+/sys df -h             # 磁盘使用
+/sys ps aux            # 进程列表
 ```
 
-## 常用命令
+## 4️⃣ 特殊功能
 
+### 查看历史
 ```bash
-# 目录操作
-/sys pwd          # 当前目录
-/sys cd /tmp      # 切换目录
-/sys ls           # 列出文件
-
-# 系统信息
-/sys df -h        # 磁盘
-/sys free -h      # 内存
-/sys ps aux       # 进程
-
-# 查看文件
-/sys cat file.txt
-/sys tail -100 log.txt
-/sys grep "error" log.txt
-
-# 网络
-/sys netstat -an
-/sys ping baidu.com -c 4
-
-# 历史和帮助
-/sys history      # 查看历史
-/sys              # 显示帮助
+/sys history
 ```
 
-## 特殊参数
-
+### 重置目录
 ```bash
-/sys cat large.txt -f    # 强制全部输出
+/sys reset
 ```
 
-## 注意事项
+### 强制全部输出
+```bash
+/sys cat large.txt -f
+```
 
-- ✅ 支持 cd 目录切换
-- ✅ 每个用户独立会话
-- ✅ 自动拦截 vim、top 等交互式命令
-- ✅ 智能优化常用命令输出
-- 📝 所有命令会被记录
+## ⚠️ 注意事项
+
+- ✅ 仅管理员可用
+- ✅ 每个用户独立的工作目录
+- ✅ 所有命令会记录日志
+- ❌ 不支持交互式命令（vim、top等）
+- ⚠️ 谨慎使用危险命令（rm -rf等）
 
 ---
 
-**就这么简单！** 🎉
+**完成！开始使用 `/sys` 命令吧！** 🎉

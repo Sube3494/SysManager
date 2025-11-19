@@ -19,7 +19,6 @@ class ServerManager(Star):
         self.log_operations: bool = True
         self.user_cwd: dict = {}  # 记录每个用户的当前工作目录
         self.user_history: dict = {}  # 记录每个用户的命令历史
-        self.direct_mode_users: set = set()  # 处于直接模式的用户
         
     async def initialize(self):
         """初始化插件，加载配置"""
@@ -100,17 +99,6 @@ class ServerManager(Star):
             yield event.plain_result(result.strip())
             return
         
-        if cmd == ">>":
-            self.direct_mode_users.add(user_id)
-            current_cwd = self.user_cwd.get(user_id, os.getcwd())
-            yield event.plain_result(f"已进入直接模式\n当前目录: {current_cwd}\n发送 << 退出")
-            return
-        
-        if cmd == "<<":
-            self.direct_mode_users.discard(user_id)
-            yield event.plain_result("已退出直接模式")
-            return
-        
         if not cmd:
             # 显示当前工作目录
             current_cwd = self.user_cwd.get(user_id, os.getcwd())
@@ -120,15 +108,13 @@ class ServerManager(Star):
                 f"内置命令:\n"
                 f"  pwd: 显示当前目录\n"
                 f"  history: 查看命令历史\n"
-                f"  reset: 重置工作目录\n"
-                f"  >>: 进入直接模式(免输/sys)\n"
-                f"  <<: 退出直接模式\n\n"
+                f"  reset: 重置工作目录\n\n"
                 f"参数:\n"
                 f"  -f: 强制全部输出\n\n"
                 f"示例:\n"
                 f"  /sys ls\n"
                 f"  /sys cd /var/log\n"
-                f"  /sys >>"
+                f"  /sys cat large.txt -f"
             )
             return
         
@@ -453,114 +439,6 @@ class ServerManager(Star):
             prev_empty = is_empty
         
         return '\n'.join(optimized_lines).strip()
-
-    @filter.on_message()
-    async def direct_mode_handler(self, event: AstrMessageEvent):
-        """直接模式消息处理器"""
-        user_id = str(event.get_sender_id())
-        
-        # 检查用户是否在直接模式中
-        if user_id not in self.direct_mode_users:
-            return
-        
-        # 检查是否是管理员
-        if not event.is_admin():
-            return
-        
-        # 检查群组权限
-        if not self._check_group_permission(event):
-            return
-        
-        # 获取消息内容
-        cmd = event.message_str.strip()
-        
-        # 如果是以 / 开头的命令，跳过（让其他插件处理）
-        if cmd.startswith("/"):
-            return
-        
-        # 退出直接模式
-        if cmd == "<<" or cmd == "exit" or cmd == "quit":
-            self.direct_mode_users.discard(user_id)
-            yield event.plain_result("已退出直接模式")
-            return
-        
-        # 空消息，显示当前目录
-        if not cmd:
-            current_cwd = self.user_cwd.get(user_id, os.getcwd())
-            yield event.plain_result(f"[{current_cwd}]")
-            return
-        
-        # 检查交互式命令
-        blocked_msg = self._check_interactive_command(cmd)
-        if blocked_msg:
-            yield event.plain_result(blocked_msg)
-            return
-        
-        # 记录历史
-        if user_id not in self.user_history:
-            self.user_history[user_id] = []
-        self.user_history[user_id].append(cmd)
-        if len(self.user_history[user_id]) > 50:
-            self.user_history[user_id] = self.user_history[user_id][-50:]
-        
-        # 记录日志
-        self._log_operation(user_id, f"[直接模式] {cmd}")
-        
-        # 处理 cd 命令
-        if cmd.strip().lower().startswith("cd ") or cmd.strip().lower() == "cd":
-            result_msg = self._handle_cd_command(user_id, cmd)
-            yield event.plain_result(result_msg)
-            return
-        
-        # 内置命令
-        if cmd == "pwd":
-            current_cwd = self.user_cwd.get(user_id, os.getcwd())
-            yield event.plain_result(current_cwd)
-            return
-        
-        # 获取工作目录
-        cwd = self.user_cwd.get(user_id, None)
-        
-        # 检查 -f 参数
-        force_full_output = False
-        if cmd.endswith(" -f"):
-            force_full_output = True
-            cmd = cmd[:-3].strip()
-        
-        # 执行命令
-        try:
-            result = subprocess.run(
-                cmd,
-                shell=True,
-                capture_output=True,
-                text=True,
-                timeout=self.command_timeout,
-                cwd=cwd
-            )
-            
-            output = result.stdout if result.stdout else result.stderr
-            
-            if not output:
-                output = "(无输出)"
-            else:
-                output = self._optimize_output(cmd, output, result.returncode)
-            
-            original_length = len(output)
-            if not force_full_output and len(output) > self.max_output_length:
-                output = output[:self.max_output_length] + f"\n\n(已截断，使用 -f 查看全部)"
-            
-            if result.returncode != 0:
-                output = f"[返回码: {result.returncode}]\n{output}"
-            
-            current_cwd = self.user_cwd.get(user_id, os.getcwd())
-            final_output = f"[{current_cwd}]\n{output}"
-            
-            yield event.plain_result(final_output)
-            
-        except subprocess.TimeoutExpired:
-            yield event.plain_result(f"超时(>{self.command_timeout}s)")
-        except Exception as e:
-            yield event.plain_result(f"错误: {str(e)}")
 
     async def terminate(self):
         """插件销毁"""
