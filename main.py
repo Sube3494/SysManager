@@ -13,14 +13,18 @@ class ServerManager(Star):
     def __init__(self, context: Context, config: dict | None = None):
         super().__init__(context, config)
         self.config = config or {}
+        self.enabled_groups: list = []
         self.command_timeout: int = 30
         self.max_output_length: int = 2000
         self.log_operations: bool = True
         self.user_cwd: dict = {}  # 记录每个用户的当前工作目录
+        self.user_history: dict = {}  # 记录每个用户的命令历史
+        self.direct_mode_users: set = set()  # 处于直接模式的用户
         
     async def initialize(self):
         """初始化插件，加载配置"""
         try:
+            self.enabled_groups = self.config.get("enabled_groups", [])
             self.command_timeout = self.config.get("command_timeout", 30)
             self.max_output_length = self.config.get("max_output_length", 2000)
             self.log_operations = self.config.get("log_operations", True)
@@ -29,6 +33,7 @@ class ServerManager(Star):
             
             logger.info(f"✅ 服务器管理插件已加载")
             logger.info(f"   管理员数量: {len(astrbot_admins)}")
+            logger.info(f"   生效范围: {'所有群和私聊' if not self.enabled_groups else f'{len(self.enabled_groups)}个指定群'}")
             logger.info(f"   命令前缀: /sys (固定)")
             logger.info(f"   命令超时: {self.command_timeout}秒")
             logger.info(f"   最大输出: {self.max_output_length}字符")
@@ -41,28 +46,89 @@ class ServerManager(Star):
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             logger.info(f"[操作日志] {timestamp} | 用户:{user_id} | 命令:{cmd}")
 
+    def _check_group_permission(self, event: AstrMessageEvent) -> bool:
+        """检查群组权限"""
+        # 如果没有配置群组限制，所有群都允许
+        if not self.enabled_groups:
+            return True
+        
+        # 获取群号（如果是群聊）
+        session_id = event.session_id
+        # session_id 格式类似: aiocqhttp:GroupMessage:123456789
+        parts = session_id.split(":")
+        if len(parts) >= 3 and "Group" in parts[1]:
+            group_id = parts[2]
+            return group_id in [str(g) for g in self.enabled_groups]
+        
+        # 私聊也允许（可选，根据需求调整）
+        return True
+    
     @filter.permission_type(PermissionType.ADMIN)
     @filter.command("sys")
     async def execute_command(self, event: AstrMessageEvent):
         """执行系统命令 - 用法: /sys <命令>"""
         user_id = str(event.get_sender_id())
         
+        # 检查群组权限
+        if not self._check_group_permission(event):
+            return  # 静默忽略，不在允许的群中
+        
         # 获取命令内容（去掉 "sys" 前缀）
         cmd = event.message_str.strip()
         if cmd.lower().startswith("sys"):
             cmd = cmd[3:].strip()
+        
+        # 内置命令
+        if cmd == "pwd" or cmd == "cwd":
+            current_cwd = self.user_cwd.get(user_id, os.getcwd())
+            yield event.plain_result(current_cwd)
+            return
+        
+        if cmd == "reset" or cmd == "~":
+            self.user_cwd.pop(user_id, None)
+            yield event.plain_result(f"已重置工作目录到: {os.getcwd()}")
+            return
+        
+        if cmd == "history" or cmd == "h":
+            history = self.user_history.get(user_id, [])
+            if not history:
+                yield event.plain_result("(无历史记录)")
+                return
+            result = "命令历史 (最近10条):\n"
+            for i, h in enumerate(history[-10:], 1):
+                result += f"{i}. {h}\n"
+            yield event.plain_result(result.strip())
+            return
+        
+        if cmd == ">>":
+            self.direct_mode_users.add(user_id)
+            current_cwd = self.user_cwd.get(user_id, os.getcwd())
+            yield event.plain_result(f"已进入直接模式\n当前目录: {current_cwd}\n发送 << 退出")
+            return
+        
+        if cmd == "<<":
+            self.direct_mode_users.discard(user_id)
+            yield event.plain_result("已退出直接模式")
+            return
         
         if not cmd:
             # 显示当前工作目录
             current_cwd = self.user_cwd.get(user_id, os.getcwd())
             yield event.plain_result(
                 f"当前目录: {current_cwd}\n\n"
-                f"用法: /sys <命令> [-f]\n"
-                f"  -f: 强制输出全部内容(跳过长度限制)\n\n"
+                f"用法: /sys <命令> [-f]\n\n"
+                f"内置命令:\n"
+                f"  pwd: 显示当前目录\n"
+                f"  history: 查看命令历史\n"
+                f"  reset: 重置工作目录\n"
+                f"  >>: 进入直接模式(免输/sys)\n"
+                f"  <<: 退出直接模式\n\n"
+                f"参数:\n"
+                f"  -f: 强制全部输出\n\n"
                 f"示例:\n"
                 f"  /sys ls\n"
                 f"  /sys cd /var/log\n"
-                f"  /sys cat large.txt -f"
+                f"  /sys >>"
             )
             return
         
@@ -71,6 +137,20 @@ class ServerManager(Star):
         if cmd.endswith(" -f") or cmd.endswith(" --full"):
             force_full_output = True
             cmd = cmd.replace(" -f", "").replace(" --full", "").strip()
+        
+        # 检查是否是交互式命令
+        blocked_msg = self._check_interactive_command(cmd)
+        if blocked_msg:
+            yield event.plain_result(blocked_msg)
+            return
+        
+        # 记录到历史
+        if user_id not in self.user_history:
+            self.user_history[user_id] = []
+        self.user_history[user_id].append(cmd)
+        # 只保留最近50条
+        if len(self.user_history[user_id]) > 50:
+            self.user_history[user_id] = self.user_history[user_id][-50:]
         
         # 记录日志
         self._log_operation(user_id, cmd)
@@ -113,7 +193,11 @@ class ServerManager(Star):
             if result.returncode != 0:
                 output = f"[返回码: {result.returncode}]\n{output}"
             
-            yield event.plain_result(output)
+            # 在输出前添加当前工作目录
+            current_cwd = self.user_cwd.get(user_id, os.getcwd())
+            final_output = f"[{current_cwd}]\n{output}"
+            
+            yield event.plain_result(final_output)
             
         except subprocess.TimeoutExpired:
             yield event.plain_result(f"超时(>{self.command_timeout}s)")
@@ -121,6 +205,44 @@ class ServerManager(Star):
             logger.error(f"命令执行失败: {e}")
             yield event.plain_result(f"错误: {str(e)}")
 
+    def _check_interactive_command(self, cmd: str) -> str | None:
+        """检查是否是交互式命令，返回警告信息或None"""
+        cmd_base = cmd.strip().split()[0].lower() if cmd.strip() else ""
+        
+        # 交互式命令黑名单
+        interactive_commands = {
+            # 编辑器
+            "vim": ("查看文件", "cat <文件>"),
+            "vi": ("查看文件", "cat <文件>"),
+            "nano": ("查看文件", "cat <文件>"),
+            "emacs": ("查看文件", "cat <文件>"),
+            "nvim": ("查看文件", "cat <文件>"),
+            
+            # 交互式工具
+            "top": ("查看进程", "top -bn1 | head -20 或 ps aux"),
+            "htop": ("查看进程", "ps aux"),
+            "less": ("查看文件", "cat <文件> 或 head/tail"),
+            "more": ("查看文件", "cat <文件>"),
+            
+            # 交互式Shell
+            "bash": ("执行命令", "直接输入命令，不要进入bash"),
+            "sh": ("执行命令", "直接输入命令"),
+            "zsh": ("执行命令", "直接输入命令"),
+            
+            # 需要输入的命令
+            "passwd": ("修改密码", "请直接登录服务器操作"),
+            "mysql": ("数据库", "mysql -e '查询语句'"),
+            "psql": ("数据库", "psql -c '查询语句'"),
+            "python": ("Python", "python -c '代码' 或 python 脚本.py"),
+            "node": ("Node", "node -e '代码' 或 node 脚本.js"),
+        }
+        
+        if cmd_base in interactive_commands:
+            purpose, alternative = interactive_commands[cmd_base]
+            return f"不支持 {cmd_base} ({purpose})\n替代: {alternative}"
+        
+        return None
+    
     def _handle_cd_command(self, user_id: str, cmd: str) -> str:
         """处理 cd 命令"""
         # 提取目标路径
@@ -331,6 +453,114 @@ class ServerManager(Star):
             prev_empty = is_empty
         
         return '\n'.join(optimized_lines).strip()
+
+    @filter.on_message()
+    async def direct_mode_handler(self, event: AstrMessageEvent):
+        """直接模式消息处理器"""
+        user_id = str(event.get_sender_id())
+        
+        # 检查用户是否在直接模式中
+        if user_id not in self.direct_mode_users:
+            return
+        
+        # 检查是否是管理员
+        if not event.is_admin():
+            return
+        
+        # 检查群组权限
+        if not self._check_group_permission(event):
+            return
+        
+        # 获取消息内容
+        cmd = event.message_str.strip()
+        
+        # 如果是以 / 开头的命令，跳过（让其他插件处理）
+        if cmd.startswith("/"):
+            return
+        
+        # 退出直接模式
+        if cmd == "<<" or cmd == "exit" or cmd == "quit":
+            self.direct_mode_users.discard(user_id)
+            yield event.plain_result("已退出直接模式")
+            return
+        
+        # 空消息，显示当前目录
+        if not cmd:
+            current_cwd = self.user_cwd.get(user_id, os.getcwd())
+            yield event.plain_result(f"[{current_cwd}]")
+            return
+        
+        # 检查交互式命令
+        blocked_msg = self._check_interactive_command(cmd)
+        if blocked_msg:
+            yield event.plain_result(blocked_msg)
+            return
+        
+        # 记录历史
+        if user_id not in self.user_history:
+            self.user_history[user_id] = []
+        self.user_history[user_id].append(cmd)
+        if len(self.user_history[user_id]) > 50:
+            self.user_history[user_id] = self.user_history[user_id][-50:]
+        
+        # 记录日志
+        self._log_operation(user_id, f"[直接模式] {cmd}")
+        
+        # 处理 cd 命令
+        if cmd.strip().lower().startswith("cd ") or cmd.strip().lower() == "cd":
+            result_msg = self._handle_cd_command(user_id, cmd)
+            yield event.plain_result(result_msg)
+            return
+        
+        # 内置命令
+        if cmd == "pwd":
+            current_cwd = self.user_cwd.get(user_id, os.getcwd())
+            yield event.plain_result(current_cwd)
+            return
+        
+        # 获取工作目录
+        cwd = self.user_cwd.get(user_id, None)
+        
+        # 检查 -f 参数
+        force_full_output = False
+        if cmd.endswith(" -f"):
+            force_full_output = True
+            cmd = cmd[:-3].strip()
+        
+        # 执行命令
+        try:
+            result = subprocess.run(
+                cmd,
+                shell=True,
+                capture_output=True,
+                text=True,
+                timeout=self.command_timeout,
+                cwd=cwd
+            )
+            
+            output = result.stdout if result.stdout else result.stderr
+            
+            if not output:
+                output = "(无输出)"
+            else:
+                output = self._optimize_output(cmd, output, result.returncode)
+            
+            original_length = len(output)
+            if not force_full_output and len(output) > self.max_output_length:
+                output = output[:self.max_output_length] + f"\n\n(已截断，使用 -f 查看全部)"
+            
+            if result.returncode != 0:
+                output = f"[返回码: {result.returncode}]\n{output}"
+            
+            current_cwd = self.user_cwd.get(user_id, os.getcwd())
+            final_output = f"[{current_cwd}]\n{output}"
+            
+            yield event.plain_result(final_output)
+            
+        except subprocess.TimeoutExpired:
+            yield event.plain_result(f"超时(>{self.command_timeout}s)")
+        except Exception as e:
+            yield event.plain_result(f"错误: {str(e)}")
 
     async def terminate(self):
         """插件销毁"""
