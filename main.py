@@ -23,11 +23,13 @@ class ServerManager(Star):
     async def initialize(self):
         """初始化插件，加载配置"""
         try:
-            # 直接从 config 对象读取配置（扁平结构）
-            self.enabled_groups = self.config.get("enabled_groups", [])
-            self.command_timeout = self.config.get("command_timeout", 30)
-            self.max_output_length = self.config.get("max_output_length", 2000)
-            self.log_operations = self.config.get("log_operations", True)
+            # 获取 sysmanager 配置项
+            plugin_config = self.config.get("sysmanager", {})
+            
+            self.enabled_groups = plugin_config.get("enabled_groups", [])
+            self.command_timeout = plugin_config.get("command_timeout", 30)
+            self.max_output_length = plugin_config.get("max_output_length", 2000)
+            self.log_operations = plugin_config.get("log_operations", True)
             
             astrbot_admins = self.context.get_config().get("admins_id", [])
             
